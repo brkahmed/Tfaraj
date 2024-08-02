@@ -27,7 +27,7 @@ async def main():
 
     ANIME_API_URL = 'https://tfaraj.onrender.com/'
     
-    JIKAN_API_URL = 'https://api.jikan.moe/v4'
+    JIKAN_API_URL = 'https://api.jikan.moe/'
 
 
     bot = Bot(BOT_API_KEY)
@@ -82,18 +82,29 @@ async def search_anime(message: Message, state: FSMContext):
 
 @dp.callback_query(AnimeCallback.filter())
 async def show_anime(query: CallbackQuery, callback_data: AnimeCallback):
-    await query.message.answer_photo(
-        'https://img-cdn.pixlr.com/image-generator/history/'\
-        '65bb506dcb310754719cf81f/ede935de-1138-4f66-8ed7-44bd16efc709/medium.webp'
-    )
+    json = (await send_request(
+        api=dp.jikan,
+        endpoint=f'/v4/anime/{callback_data.mal_id}'
+    ))['data']
+
+    await query.message.answer_photo(json['images']['jpg']['large_image_url'])
 
     await query.message.answer(
-        text=f'Show anime: {callback_data.id} -  - {callback_data.mal_id}',
+        text=f'''{md.bold(json['title'])}
+Score: {json['score']}⭐ - {json['scored_by']}
+Rank: {json['rank']}''',
+        parse_mode=ParseMode.MARKDOWN,
         reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(
-                text='Show episodes',
-                callback_data=ShowEpisodeCallback(anime_id=callback_data.id).pack()
-            )]]
+            inline_keyboard=[
+                [InlineKeyboardButton(
+                    text='Show episodes',
+                    callback_data=ShowEpisodeCallback(anime_id=callback_data.id).pack()
+                )],
+                [InlineKeyboardButton(
+                    text='trailer',
+                    url=json['trailer']['url']
+                )]
+            ]
         )
     )
 
@@ -119,8 +130,25 @@ async def show_episode(query: CallbackQuery, callback_data: ShowEpisodeCallback)
         reply_markup=keyboard
     )
 
-
-
+@dp.callback_query(EpisodeCallback.filter())
+async def show_sources(query: CallbackQuery, callback_data: EpisodeCallback):
+    json = await send_request(
+        api=dp.api,
+        endpoint='/source',
+        params={'episode_id': callback_data.id}
+    )
+    await query.message.answer(
+        text=md.bold('Avaible sources'),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(
+                    text=source['name'],
+                    url=source['url']
+                )] for source in json if source['url'].startswith('http')
+            ]
+        )
+    )
 
 
 

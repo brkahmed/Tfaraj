@@ -29,7 +29,7 @@ async def send_request(
         api: ClientSession,
         endpoint: str,
         params: dict = {}
-) -> list[dict[str, str | int]] | dict[str, str | int] | None:
+) -> list | dict | None:
     async with api.get(endpoint, params=params) as response:
         if response.ok:
             return await response.json()
