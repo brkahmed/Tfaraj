@@ -4,88 +4,144 @@ import json
 import re
 from aiohttp import ClientSession
 from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
 from concurrent.futures import ProcessPoolExecutor
 from functools import reduce
 from operator import add
+from collections import deque
+from utils import get_logger
 
-logger = logging.Logger(__name__)
+logger = get_logger('blkom')
 
 async def main():
-    logger.addHandler(logging.StreamHandler())
-
     await scrappe()
 
 async def scrappe():
-    session = ClientSession()
-    
-    """ animes = await get_animes(session) """
+    async with ClientSession() as session:
+        session.ua = UserAgent(os=['windows', 'macos', 'linux', 'android', 'ios'])
+        """ animes = await get_animes(session) """
 
-    with open('result.json') as f:
-        animes = json.load(f)
+        with open('result.json') as f:
+            animes = json.load(f)
 
-    set_episodes_url(session, animes)
-
-    """ with open('result.json', 'w') as f:
-        json.dump(animes, f) """
-
-    await session.close()
+        try:
+            animes = await set_episodes_url(session, animes)
+        finally:
+            with open('result2.json', 'w') as f:
+                json.dump(animes, f)
 
 
 async def get_animes(
     session: ClientSession,
     list_url: str = 'https://blkom.com/animes-list?sort_by=name&page={}',
     pages_number: int = 214    
-):
+) -> list[dict]:
     urls = (list_url.format(i) for i in range(1, pages_number + 1))
-    tasks = (get_page(session, url) for url in urls)
+    tasks = (get_page(session, url, 'LIST PAGE') for url in urls)
     pages = await asyncio.gather(*tasks)
-    logger.info('Parsing Anime Pages')
-    with ProcessPoolExecutor() as executor:
-        animes = reduce(add, executor.map(process_list_page, pages))
-    return animes
 
-def process_list_page(page: str):
+    with ProcessPoolExecutor() as executor:
+        result = reduce(add, executor.map(process_list_page, pages))
+
+    return result
+
+def process_list_page(page: str) -> dict[str, str]:
+    logger.info('LIST PAGE:PARSING:START')
+
     soup = BeautifulSoup(page, 'lxml')
     infos = map(
         lambda info: (info.select_one('.name a'), info.select_one('.story-text').text),
         soup.select('.info')
     )
 
+    logger.info('LIST PAGE:PARSING:END')
     return [
         {
-            'name': name.text,
-            'url': name.attrs['href'],
+            'name': tag.text,
+            'url': tag.attrs['href'],
             'story': story
-        } for name, story in infos
+        } for tag, story in infos
     ]
             
 
 async def set_episodes_url(
         session: ClientSession,
         animes: list[dict],
-        mal_id_pattern: re.Pattern = re.compile(r'/(\d+)/')
+        pages_per_time: int = 100,
 ):
-    pass
+    urls = (anime['url'] for anime in animes)
+    tasks = deque(get_page(session, url, 'EPISODE URL') for url in urls)
+    animes: deque = deque(animes)
+    result = []
+    while tasks:
+        pages = await asyncio.gather(*(tasks.popleft() for _ in range(min(pages_per_time, len(tasks)))))
+        with ProcessPoolExecutor() as executor:
+            result.extend(executor.map(process_anime_page, pages, (animes.popleft() for _ in range(pages_per_time, len(animes)))))
+
+    return result
+
+def process_anime_page(
+        page: str,
+        anime: dict,
+        mal_id_pattern: re.Pattern = re.compile(r'/(\d+)/?')
+):
+    if not page:
+        logger.error('ANIME PAGE:PARSING:MISSING INFO:PAGE:%s', anime['name'])
+        return anime
+    
+    logger.info('ANIME PAGE:PARSING:START:%s', anime['name'])
+
+    soup = BeautifulSoup(page, 'lxml')
+    try:
+        mal_id = mal_id_pattern.search(soup.select_one('a.blue.cta').attrs['href']).group(1)
+    except (KeyError, AttributeError):
+        logger.warning('ANIME PAGE:PARSING:MISSING INFO:MAL_ID:%s', anime['name'])
+        mal_id = None
+    try:
+        episode_urls = {tag.select_one('span:last-child').text:tag.attrs['href'] for tag in soup.select('.episode-link a')}
+    except AttributeError:
+        logger.warning('ANIME PAGE:PARSING:MISSING INFO:EPISODES:%s', anime['name'])
+        episode_urls = None
+
+    anime.update(
+        mal_id=mal_id,
+        episode_urls=episode_urls
+    )
+
+    logger.info('ANIME PAGE:%s:PARSING:FINISHED', anime['name'])
+    return anime
+
 
 async def get_page(
     session: ClientSession,
     url: str,
+    log_msg: str,
     retry_attempts: int = 10,
+    sleep_time: float = .5,
     headers: dict = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en,fr;q=0.9,en-US;q=0.8,fr-FR;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, zstd',
+        'Cache-Control': 'no-cache'
     }
 ) -> str | None:
     while True:
-        logger.info('SENDING REQUEST: %s', url)
-        async with session.get(url, headers=headers) as response:
-            if response.ok:
-                return await response.text()
-        
-        logger.info('REQUEST FAIL: retrying %s', url)
+        headers.update({'User-Agent': session.ua.random})
+        logger.info('%s:REQUEST:SENDING:%s', log_msg, url)
+        try:
+            async with session.get(url, headers=headers) as response:
+                if response.ok:
+                    logger.info('%s:REQUEST:SUCCESS:%s', log_msg, url)
+                    return await response.text()
+                logger.warning('%s:REQUEST:FAIL:%i:%s', log_msg, response.status, url)
+        except asyncio.exceptions.TimeoutError:
+            logger.warning('%s:REQUEST:FAIL:TimeoutError:%s', log_msg, response.status, url)
 
         if retry_attempts == 0: break
         retry_attempts -= 1
-        await asyncio.sleep(.5)
+        await asyncio.sleep(sleep_time)
+
+    logger.error('%s:REQUEST:NOT SERVED:%s', log_msg, url)
 
 
 if __name__ == '__main__':
