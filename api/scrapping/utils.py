@@ -1,6 +1,16 @@
 import logging
 import sys
+import json
 from colorama import init, Fore, Style
+from itertools import cycle
+
+def get_proxies():
+    with open('proxies.json') as f:
+        proxies = json.load(f)
+    return cycle(proxies)
+
+def get_proxy(proxies=get_proxies()):
+    return next(proxies)
 
 init(autoreset=True)
 

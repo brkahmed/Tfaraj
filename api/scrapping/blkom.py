@@ -8,7 +8,7 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import reduce
 from operator import add
 from collections import deque
-from utils import get_logger
+from utils import get_logger, get_proxy
 
 logger = get_logger('blkom')
 
@@ -17,14 +17,13 @@ async def main():
 
 async def scrappe():
     async with ClientSession() as session:
-        session.ua = UserAgent(os=['windows', 'macos', 'android', 'ios'])
-        """ animes = await get_animes(session) """
+        session.ua = UserAgent()
 
-        with open('result.json') as f:
-            animes = json.load(f)
+        animes = await get_animes(session)
 
         animes = await set_episodes_url(session, deque(animes))
-        with open('result3.json', 'w') as f:
+
+        with open('result.json', 'w') as f:
             json.dump(animes, f)
 
 
@@ -63,7 +62,7 @@ def process_list_page(page: str) -> list[dict[str, str]]:
 async def set_episodes_url(
         session: ClientSession,
         animes: deque[dict],
-        pages_per_time: int = 50,
+        pages_per_time: int = 200,
 ):
     urls = (anime['url'] for anime in animes)
     tasks = deque(get_page(session, url, 'EPISODE URL') for url in urls)
@@ -80,19 +79,21 @@ def process_anime_page(
         page: str,
         anime: dict,
         mal_id_pattern: re.Pattern = re.compile(r'/(\d+)/?')
-):
-    if not page:
+):    
+    logger.info('ANIME PAGE:PARSING:START:%s', anime['name'])
+  
+    try:
+        soup = BeautifulSoup(page, 'lxml')
+    except TypeError:
         logger.error('ANIME PAGE:PARSING:MISSING INFO:PAGE:%s', anime['name'])
         return anime
-    
-    logger.info('ANIME PAGE:PARSING:START:%s', anime['name'])
-
-    soup = BeautifulSoup(page, 'lxml')
+  
     try:
         mal_id = mal_id_pattern.search(soup.select_one('a.blue.cta').attrs['href']).group(1)
     except (KeyError, AttributeError):
         logger.warning('ANIME PAGE:PARSING:MISSING INFO:MAL_ID:%s', anime['name'])
         mal_id = None
+  
     try:
         episode_urls = {tag.select_one('span:last-of-type').text:tag.attrs['href'] for tag in soup.select('.episode-link a')}
     except AttributeError as e:
@@ -113,6 +114,7 @@ async def get_page(
     log_msg: str,
     retry_attempts: int = 10,
     sleep_time: float = 1,
+    proxy: str | None = None,
     headers: dict = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:98.0) Gecko/20100101 Firefox/98.0",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -130,18 +132,19 @@ async def get_page(
     while True:
         logger.info('%s:REQUEST:SENDING:%s', log_msg, url)
         try:
-            async with session.get(url, headers=headers) as response:
+            async with session.get(url, headers=headers, proxy=proxy) as response:
                 if response.ok:
                     logger.info('%s:REQUEST:SUCCESS:%s', log_msg, url)
                     return await response.text()
                 logger.info('%s:REQUEST:FAIL:%i:%s', log_msg, response.status, url)
-        except asyncio.exceptions.TimeoutError:
-            logger.info('%s:REQUEST:FAIL:TimeoutError:%s', log_msg, response.status, url)
+        except Exception as e:
+            logger.info('%s:REQUEST:FAIL:%s:%s', log_msg, str(e), url)
 
         if retry_attempts == 0: break
         retry_attempts -= 1
 
         headers['User-Agent'] = session.ua.random
+        proxy = get_proxy()
         await asyncio.sleep(sleep_time)
 
     logger.error('%s:REQUEST:NOT SERVED:%s', log_msg, url)
