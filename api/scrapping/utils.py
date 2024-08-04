@@ -1,5 +1,4 @@
 import logging
-from logging.handlers import RotatingFileHandler
 import sys
 from colorama import init, Fore, Style
 
