@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import json
 import re
 from aiohttp import ClientSession
@@ -18,24 +17,22 @@ async def main():
 
 async def scrappe():
     async with ClientSession() as session:
-        session.ua = UserAgent(os=['windows', 'macos', 'linux', 'android', 'ios'])
+        session.ua = UserAgent(os=['windows', 'macos', 'android', 'ios'])
         """ animes = await get_animes(session) """
 
         with open('result.json') as f:
             animes = json.load(f)
 
-        try:
-            animes = await set_episodes_url(session, animes)
-        finally:
-            with open('result2.json', 'w') as f:
-                json.dump(animes, f)
+        animes = await set_episodes_url(session, deque(animes))
+        with open('result3.json', 'w') as f:
+            json.dump(animes, f)
 
 
 async def get_animes(
     session: ClientSession,
     list_url: str = 'https://blkom.com/animes-list?sort_by=name&page={}',
     pages_number: int = 214    
-) -> list[dict]:
+) -> list[dict[str, str]]:
     urls = (list_url.format(i) for i in range(1, pages_number + 1))
     tasks = (get_page(session, url, 'LIST PAGE') for url in urls)
     pages = await asyncio.gather(*tasks)
@@ -45,7 +42,7 @@ async def get_animes(
 
     return result
 
-def process_list_page(page: str) -> dict[str, str]:
+def process_list_page(page: str) -> list[dict[str, str]]:
     logger.info('LIST PAGE:PARSING:START')
 
     soup = BeautifulSoup(page, 'lxml')
@@ -63,20 +60,19 @@ def process_list_page(page: str) -> dict[str, str]:
         } for tag, story in infos
     ]
             
-
 async def set_episodes_url(
         session: ClientSession,
-        animes: list[dict],
-        pages_per_time: int = 100,
+        animes: deque[dict],
+        pages_per_time: int = 50,
 ):
     urls = (anime['url'] for anime in animes)
     tasks = deque(get_page(session, url, 'EPISODE URL') for url in urls)
-    animes: deque = deque(animes)
     result = []
     while tasks:
-        pages = await asyncio.gather(*(tasks.popleft() for _ in range(min(pages_per_time, len(tasks)))))
+        avaible = min(pages_per_time, len(tasks))
+        pages = await asyncio.gather(*(tasks.popleft() for _ in range(avaible)))
         with ProcessPoolExecutor() as executor:
-            result.extend(executor.map(process_anime_page, pages, (animes.popleft() for _ in range(pages_per_time, len(animes)))))
+            result.extend(executor.map(process_anime_page, pages, (animes.popleft() for _ in range(avaible))))
 
     return result
 
@@ -98,8 +94,8 @@ def process_anime_page(
         logger.warning('ANIME PAGE:PARSING:MISSING INFO:MAL_ID:%s', anime['name'])
         mal_id = None
     try:
-        episode_urls = {tag.select_one('span:last-child').text:tag.attrs['href'] for tag in soup.select('.episode-link a')}
-    except AttributeError:
+        episode_urls = {tag.select_one('span:last-of-type').text:tag.attrs['href'] for tag in soup.select('.episode-link a')}
+    except AttributeError as e:
         logger.warning('ANIME PAGE:PARSING:MISSING INFO:EPISODES:%s', anime['name'])
         episode_urls = None
 
@@ -108,37 +104,44 @@ def process_anime_page(
         episode_urls=episode_urls
     )
 
-    logger.info('ANIME PAGE:%s:PARSING:FINISHED', anime['name'])
+    logger.info('ANIME PAGE:PARSING:FINISHED:%s', anime['name'])
     return anime
-
 
 async def get_page(
     session: ClientSession,
     url: str,
     log_msg: str,
     retry_attempts: int = 10,
-    sleep_time: float = .5,
+    sleep_time: float = 1,
     headers: dict = {
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-        'Accept-Language': 'en,fr;q=0.9,en-US;q=0.8,fr-FR;q=0.7',
-        'Accept-Encoding': 'gzip, deflate, zstd',
-        'Cache-Control': 'no-cache'
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:98.0) Gecko/20100101 Firefox/98.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Cache-Control": "max-age=0",
     }
 ) -> str | None:
     while True:
-        headers.update({'User-Agent': session.ua.random})
         logger.info('%s:REQUEST:SENDING:%s', log_msg, url)
         try:
             async with session.get(url, headers=headers) as response:
                 if response.ok:
                     logger.info('%s:REQUEST:SUCCESS:%s', log_msg, url)
                     return await response.text()
-                logger.warning('%s:REQUEST:FAIL:%i:%s', log_msg, response.status, url)
+                logger.info('%s:REQUEST:FAIL:%i:%s', log_msg, response.status, url)
         except asyncio.exceptions.TimeoutError:
-            logger.warning('%s:REQUEST:FAIL:TimeoutError:%s', log_msg, response.status, url)
+            logger.info('%s:REQUEST:FAIL:TimeoutError:%s', log_msg, response.status, url)
 
         if retry_attempts == 0: break
         retry_attempts -= 1
+
+        headers['User-Agent'] = session.ua.random
         await asyncio.sleep(sleep_time)
 
     logger.error('%s:REQUEST:NOT SERVED:%s', log_msg, url)
