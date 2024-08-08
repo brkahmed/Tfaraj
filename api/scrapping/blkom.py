@@ -23,9 +23,10 @@ async def scrappe():
 
         animes = await set_episodes_url(session, deque(animes))
 
-        with open('result.json', 'w') as f:
-            json.dump(animes, f)
+        await set_sources_url(session, animes)
 
+        with open('blkom.json', 'w') as f:
+            json.dump(animes, f)
 
 async def get_animes(
     session: ClientSession,
@@ -63,7 +64,7 @@ async def set_episodes_url(
         session: ClientSession,
         animes: deque[dict],
         pages_per_time: int = 200,
-):
+) -> list[dict]:
     urls = (anime['url'] for anime in animes)
     tasks = deque(get_page(session, url, 'EPISODE URL') for url in urls)
     result = []
@@ -79,7 +80,7 @@ def process_anime_page(
         page: str,
         anime: dict,
         mal_id_pattern: re.Pattern = re.compile(r'/(\d+)/?')
-):    
+) -> dict[str]:    
     logger.info('ANIME PAGE:PARSING:START:%s', anime['name'])
   
     try:
@@ -107,6 +108,47 @@ def process_anime_page(
 
     logger.info('ANIME PAGE:PARSING:FINISHED:%s', anime['name'])
     return anime
+
+async def set_sources_url(
+        session: ClientSession,
+        animes: list[dict],
+        pages_per_time: int = 200,
+) -> None:
+    urls = (url for anime in animes for url in anime['episode_urls'])
+    tasks = deque(get_page(session, url) for url in urls)
+    result = []
+    while tasks:
+        avaible = min(pages_per_time, len(tasks))
+        pages = await asyncio.gather(*(tasks.popleft() for _ in range(avaible)))
+        with ProcessPoolExecutor() as executor:
+            result.extend(executor.map(process_episode_page, pages))
+
+    result = iter(result)
+    for anime in animes:
+        if anime['episodes_url']:
+            anime['episodes'] = {episode_number: next(result) for episode_number in anime['episodes_url'].keys()}
+
+
+def process_episode_page(
+        page: str,
+        quality_pattern: re.Pattern = re.compile(r'\d+p?')
+) -> dict[str, dict]:
+    logger.info('EPISODE PAGE:PARSING:START')
+
+    soup = BeautifulSoup(page, 'lxml')
+    embed = {
+        tag.text: tag.attrs['data-src'] for tag in soup.select('.server a')
+    }
+    download = {
+        quality_pattern.search(tag.text).group():tag.attrs['href'] for tag in soup.select('.panel-body a')
+    }
+    
+    logger.info('ANIME PAGE:PARSING:FINISHED')
+    
+    return {
+        'embed': embed,
+        'download': download
+    }
 
 async def get_page(
     session: ClientSession,
@@ -138,7 +180,7 @@ async def get_page(
                     return await response.text()
                 logger.info('%s:REQUEST:FAIL:%i:%s', log_msg, response.status, url)
         except Exception as e:
-            logger.info('%s:REQUEST:FAIL:%s:%s', log_msg, str(e), url)
+            logger.error('%s:REQUEST:FAIL:%s:%s', log_msg, str(e), url)
 
         if retry_attempts == 0: break
         retry_attempts -= 1
